@@ -78,3 +78,27 @@ exports.reloadGraph = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * @desc API lấy TẤT CẢ các node (để hiển thị trên bản đồ)
+ * @route GET /api/nodes
+ */
+exports.getAllNodes = async (req, res) => {
+  try {
+    // 1. Đảm bảo graph đã load
+    if (!graphLoader.isLoaded()) {
+      await graphLoader.loadAll();
+    }
+
+    // 2. Lấy map 'nodes' từ graphLoader
+    const { nodes } = await graphLoader.getGraph();
+
+    // 3. Chuyển Map thành Array để gửi JSON
+    const nodesArray = Array.from(nodes.values());
+
+    res.status(200).json(nodesArray);
+  } catch (err) {
+    console.error('getAllNodes error:', err);
+    res.status(500).json({ error: 'Lỗi máy chủ nội bộ' });
+  }
+};
