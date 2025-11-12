@@ -1,7 +1,7 @@
-const express = require('express');
 const path = require('path');
-const dotenv = require('dotenv');
-dotenv.config();
+// Nạp .env từ thư mục 'backend' (lùi 1 cấp từ 'src')
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+const express = require('express');
 const connectDB = require('./config/db.js');
 const cors = require('cors');
 const routeRoutes = require('./routes/routeRoutes');
@@ -27,6 +27,7 @@ algorithmManager.register(astarService);
 
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 
 // Middleware

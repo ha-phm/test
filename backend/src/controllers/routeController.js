@@ -1,51 +1,105 @@
-// controllers/routeController.js
 const algorithmManager = require('../services/algorithmManager');
 const graphLoader = require('../services/graphLoader');
+// 1. MỚI: Import model Node của bạn
+// (Đảm bảo đường dẫn này đúng với cấu trúc dự án của bạn)
+const Node = require('../models/nodeModel');
 
 /**
- * POST /api/route
- * Body: { startId, goalId, algorithm }
+ * @desc MỚI: Hàm tìm node gần nhất từ tọa độ
+ * @param {number} lng - Kinh độ
+ * * @param {number} lat - Vĩ độ
+ */
+const findNearestNode = async (lng, lat) => {
+  try {
+    // MongoDB $near yêu cầu [lng, lat]
+    const node = await Node.findOne({
+      loc: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [lng, lat] 
+          },
+           // $maxDistance: 2000 // Tùy chọn: Giới hạn tìm trong 2km
+        }
+      }
+    });
+    return node;
+  } catch (err) {
+    console.error("Lỗi khi tìm node gần nhất:", err);
+    return null;
+  }
+};
+
+/**
+ * @desc API tìm đường
+ * @route POST /api/route
+ * @body { startPoint: [lat, lng], endPoint: [lat, lng], algorithm: "name" }
  */
 exports.findRoute = async (req, res) => {
   try {
-    const { startId, goalId, algorithm } = req.body;
+    // 1. THAY ĐỔI: Đọc startPoint/endPoint (tọa độ)
+    const { startPoint, endPoint, algorithm } = req.body;
 
-    // 1️⃣ Kiểm tra đầu vào
-    if (!startId || !goalId) {
-      return res.status(400).json({ error: 'Thiếu startId hoặc goalId' });
+    // 2. THAY ĐỔI: Kiểm tra tọa độ
+    if (!startPoint || !endPoint) {
+      return res.status(400).json({ error: 'Thiếu startPoint hoặc endPoint' });
     }
 
-    // 2️⃣ Đảm bảo graph đã load vào RAM
+    // 3. MỚI: Tìm node ID gần nhất
+    // Lưu ý: Leaflet dùng [lat, lng], MongoDB dùng [lng, lat]
+    const startNode = await findNearestNode(startPoint[1], startPoint[0]); // [lng, lat]
+    const goalNode = await findNearestNode(endPoint[1], endPoint[0]);   // [lng, lat]
+
+    // 4. MỚI: Kiểm tra nếu không tìm thấy node
+    if (!startNode || !goalNode) {
+      return res.status(404).json({
+        error: 'Không tìm thấy nút giao thông gần điểm bạn chọn. Vui lòng chọn điểm khác trong khu vực.'
+      });
+    }
+
+    // 5. MỚI: Lấy ID từ node
+    const startId = startNode.id;
+    const goalId = goalNode.id;
+
+    // 6. Đảm bảo graph đã load vào RAM
     if (!graphLoader.isLoaded()) {
       await graphLoader.loadAll();
     }
 
-    // 3️⃣ Kiểm tra tồn tại node trong graph
+    // 7. Kiểm tra tồn tại node trong graph (Logic này vẫn giữ nguyên)
     const { nodes, graph } = await graphLoader.getGraph();
     if (!nodes.has(startId) || !nodes.has(goalId)) {
-      return res.status(404).json({ error: 'Không tìm thấy node tương ứng trong graph' });
+      return res.status(404).json({ error: 'Không tìm thấy node tương ứng trong graph (đã load)' });
     }
 
-    // 4️⃣ Lấy thuật toán (mặc định A*)
+    // 8. Lấy thuật toán (mặc định A*)
     const algo = algorithm || 'astar';
     const routeFinder = algorithmManager.get(algo);
     if (!routeFinder) {
       return res.status(400).json({ error: `Thuật toán '${algo}' không tồn tại` });
     }
 
-    // 5️⃣ Chạy thuật toán tìm đường
+    // 9. Chạy thuật toán tìm đường
     const result = await algorithmManager.run(algo, { nodes, graph, startId, goalId });
 
-    // 6️⃣ Trả kết quả về client
+    // 10. Trả kết quả về client
     if (!result || !result.path) {
       return res.status(404).json({ error: 'Không tìm thấy đường đi khả thi' });
     }
+
+    // 11. MỚI: Gửi kèm tọa độ của node đã tìm thấy
+    result.startPoint = { lat: startNode.lat, lon: startNode.lon };
+    result.goalPoint = { lat: goalNode.lat, lon: goalNode.lon };
 
     return res.status(200).json({
       algorithm: algo,
       path: result.path,
       steps: result.steps,
+      startPoint: result.startPoint, 
+      goalPoint: result.goalPoint,
+      distance: result.distance, // Thêm nếu thuật toán của bạn trả về
     });
+
   } catch (err) {
     console.error('findRoute error:', err);
     res.status(500).json({ error: 'Lỗi máy chủ nội bộ' });
