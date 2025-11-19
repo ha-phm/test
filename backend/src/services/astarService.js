@@ -89,8 +89,8 @@ function aStar(nodes, graph, startId, goalId) {
         for (const [neighborId, edgeData] of neighborsMap.entries()) { 
             if (closedSet.has(neighborId)) continue;
 
-            // ✅ SỬA: Dùng edgeData.cost làm chi phí thực tế
-            const costToNeighbor = edgeData.cost; 
+            // ✅ THAY ĐỔI TẠI ĐÂY: Dùng khoảng cách (distance) làm chi phí
+            const costToNeighbor = edgeData.distance; 
 
             const tentativeG = gScore.get(current) + costToNeighbor;
 

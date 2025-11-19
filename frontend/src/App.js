@@ -40,9 +40,9 @@ function App() {
       // Cập nhật state startPoint bằng tọa độ của node đã snap
       setStartPoint([routeData.startPoint.lat, routeData.startPoint.lon]);
     }
-    if (routeData.goalPoint) {
+    if (routeData.endPoint) {
       // Cập nhật state endPoint bằng tọa độ của node đã snap
-      setEndPoint([routeData.goalPoint.lat, routeData.goalPoint.lon]);
+      setEndPoint([routeData.endPoint.lat, routeData.endPoint.lon]);
     }
       setRoute(routeData);
       displayRoute(routeData);
