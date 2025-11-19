@@ -130,6 +130,8 @@ export const useMap = (mapContainerRef) => {
     map,
     startPoint,
     endPoint,
+    setStartPoint,
+    setEndPoint,
     selectingPoint,
     setSelectingPoint,
     displayRoute,

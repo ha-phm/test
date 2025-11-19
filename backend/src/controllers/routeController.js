@@ -1,158 +1,219 @@
+// controllers/routeController.js
 const algorithmManager = require('../services/algorithmManager');
 const graphLoader = require('../services/graphLoader');
-// 1. MỚI: Import model Node của bạn
-// (Đảm bảo đường dẫn này đúng với cấu trúc dự án của bạn)
-const Node = require('../models/nodeModel');
+const { haversineDistance } = require('../utils/geo');
 
-/**
- * @desc MỚI: Hàm tìm node gần nhất từ tọa độ
- * @param {number} lng - Kinh độ
- * * @param {number} lat - Vĩ độ
- */
-const findNearestNode = async (lng, lat) => {
-  try {
-    // MongoDB $near yêu cầu [lng, lat]
-    const node = await Node.findOne({
-      loc: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [lng, lat] 
-          },
-           // $maxDistance: 2000 // Tùy chọn: Giới hạn tìm trong 2km
-        }
-      }
-    });
-    return node;
-  } catch (err) {
-    console.error("Lỗi khi tìm node gần nhất:", err);
-    return null;
-  }
+// Bảng ưu tiên cho các loại đường (Điểm càng cao càng ưu tiên)
+const HIGHWAY_PRIORITY = {
+  'motorway': 5, 'trunk': 5, 'primary': 4, 'secondary': 3, 'tertiary': 2,
+  'residential': 1, 'unclassified': 1, 'living_street': 1, 'service': 1, 'road': 1, 
+  // Loại đường ưu tiên thấp (sẽ bị bỏ qua nếu có lựa chọn tốt hơn)
+  'pedestrian': 0, 'footway': 0, 'path': 0, 'steps': 0, 'track': 0,
 };
 
+
 /**
- * @desc API tìm đường
- * @route POST /api/route
- * @body { startPoint: [lat, lng], endPoint: [lat, lng], algorithm: "name" }
+ * @desc Tìm top N nodes gần nhất (Sử dụng JS iteration)
+ */
+function findNearestNodes(nodes, lat, lon, count = 10) {
+  // Chuyển Map thành mảng để tính khoảng cách
+  const distances = Array.from(nodes.entries()).map(([nodeId, node]) => {
+    return {
+      nodeId,
+      node,
+      dist: haversineDistance(lat, lon, node.lat, node.lon),
+    };
+  });
+
+  // Sắp xếp và trả về N kết quả đầu tiên
+  distances.sort((a, b) => a.dist - b.dist);
+  return distances.slice(0, count);
+}
+
+/**
+ * @desc Chọn node có loại đường ưu tiên cao nhất trong số các node gần đó
+ */
+function getBestSnapNode(nearestNodes, graph) {
+    let bestNodeId = null;
+    let maxPriority = -1;
+    // Node gần nhất tuyệt đối (dùng làm phương án dự phòng)
+    let fallbackNodeId = nearestNodes.length > 0 ? nearestNodes[0].nodeId : null; 
+
+    for (const { nodeId } of nearestNodes) {
+        // Lấy Map của các cạnh đi ra từ node này
+        const outgoingEdges = graph.get(nodeId);
+        
+        if (!outgoingEdges || outgoingEdges.size === 0) continue;
+
+        let nodeScore = 0;
+        
+        // FIX: Sử dụng values() để truy cập trực tiếp dữ liệu cạnh (edgeData)
+        for (const edgeData of outgoingEdges.values()) { 
+            const edgeType = edgeData.type;
+            const edgeScore = HIGHWAY_PRIORITY[edgeType] || -1; 
+
+            if (edgeScore > nodeScore) {
+                nodeScore = edgeScore;
+            }
+        }
+
+        // Ưu tiên node có điểm cao hơn
+        if (nodeScore > maxPriority) {
+            maxPriority = nodeScore;
+            bestNodeId = nodeId;
+        } else if (nodeScore === maxPriority && bestNodeId === null) {
+            // Nếu điểm bằng nhau và chưa có node nào được chọn
+            bestNodeId = nodeId;
+        }
+    }
+    
+    // Nếu không tìm thấy node nào có score > 0 (chỉ có footway), 
+    // ta chấp nhận node gần nhất tuyệt đối (fallback)
+    if (maxPriority <= 0 && fallbackNodeId) {
+        return fallbackNodeId;
+    }
+
+    return bestNodeId;
+}
+
+
+/**
+ * POST /api/route
  */
 exports.findRoute = async (req, res) => {
-  try {
-    // 1. THAY ĐỔI: Đọc startPoint/endPoint (tọa độ)
-    const { startPoint, endPoint, algorithm } = req.body;
+    try {
+        let { startId, goalId, algorithm, start, end } = req.body;
 
-    // 2. THAY ĐỔI: Kiểm tra tọa độ
-    if (!startPoint || !endPoint) {
-      return res.status(400).json({ error: 'Thiếu startPoint hoặc endPoint' });
+        if (!graphLoader.isLoaded()) {
+            await graphLoader.loadAll();
+        }
+
+        const { nodes, graph } = await graphLoader.getGraph();
+
+        // 1. TÌM NODE TỐT NHẤT CHO ĐIỂM BẮT ĐẦU
+        if (start && start.lat && start.lng) {
+            const nearestStartNodes = findNearestNodes(nodes, start.lat, start.lng, 10);
+            startId = getBestSnapNode(nearestStartNodes, graph);
+        }
+
+        // 2. TÌM NODE TỐT NHẤT CHO ĐIỂM KẾT THÚC
+        if (end && end.lat && end.lng) {
+            const nearestGoalNodes = findNearestNodes(nodes, end.lat, end.lng, 10);
+            goalId = getBestSnapNode(nearestGoalNodes, graph);
+        }
+
+        if (!startId || !goalId) {
+            return res.status(400).json({ error: 'Thiếu node ID cho điểm bắt đầu hoặc kết thúc. Vui lòng thử chọn điểm gần đường hơn.' });
+        }
+
+        if (!nodes.has(startId) || !nodes.has(goalId)) {
+            return res.status(404).json({ error: 'Không tìm thấy node gần điểm đã chọn' });
+        }
+
+        const algo = algorithm || 'astar';
+        const routeFinder = algorithmManager.get(algo);
+        
+        if (!routeFinder) {
+            return res.status(400).json({ error: `Thuật toán '${algo}' không tồn tại` });
+        }
+
+        console.log(`🔍 Finding route: ${startId} → ${goalId} using ${algo}`);
+        const result = await algorithmManager.run(algo, { nodes, graph, startId, goalId });
+
+        if (!result || !result.path || result.path.length === 0) {
+            return res.status(404).json({ 
+                error: 'Không tìm thấy đường đi giữa 2 điểm này. Hai điểm có thể nằm ở 2 khu vực không liên kết. Vui lòng thử chọn điểm khác.'
+            });
+        }
+
+        const coordinates = result.path.map(nodeId => {
+            const node = nodes.get(nodeId);
+            return [node.lat, node.lon];
+        });
+
+        let totalDistance = 0;
+        for (let i = 0; i < result.path.length - 1; i++) {
+            const nodeA = nodes.get(result.path[i]);
+            const nodeB = nodes.get(result.path[i + 1]);
+            totalDistance += haversineDistance(nodeA.lat, nodeA.lon, nodeB.lat, nodeB.lon);
+        }
+
+        const estimatedDuration = (totalDistance / 30) * 3600;
+
+        console.log(`✅ Found path: ${result.path.length} nodes, ${totalDistance.toFixed(2)} km`);
+
+        return res.status(200).json({
+            success: true,
+            algorithm: algo,
+            path: coordinates,
+            distance: totalDistance * 1000,
+            duration: estimatedDuration,
+            steps: result.steps
+        });
+
+    } catch (err) {
+        console.error('❌ Route error:', err);
+        res.status(500).json({ error: 'Lỗi máy chủ', message: err.message });
     }
-
-    // 3. MỚI: Tìm node ID gần nhất
-    // Lưu ý: Leaflet dùng [lat, lng], MongoDB dùng [lng, lat]
-    const startNode = await findNearestNode(startPoint[1], startPoint[0]); // [lng, lat]
-    const goalNode = await findNearestNode(endPoint[1], endPoint[0]);   // [lng, lat]
-
-    // 4. MỚI: Kiểm tra nếu không tìm thấy node
-    if (!startNode || !goalNode) {
-      return res.status(404).json({
-        error: 'Không tìm thấy nút giao thông gần điểm bạn chọn. Vui lòng chọn điểm khác trong khu vực.'
-      });
-    }
-
-    // 5. MỚI: Lấy ID từ node
-    const startId = startNode.id;
-    const goalId = goalNode.id;
-
-    // 6. Đảm bảo graph đã load vào RAM
-    if (!graphLoader.isLoaded()) {
-      await graphLoader.loadAll();
-    }
-
-    // 7. Kiểm tra tồn tại node trong graph (Logic này vẫn giữ nguyên)
-    const { nodes, graph } = await graphLoader.getGraph();
-    if (!nodes.has(startId) || !nodes.has(goalId)) {
-      return res.status(404).json({ error: 'Không tìm thấy node tương ứng trong graph (đã load)' });
-    }
-
-    // 8. Lấy thuật toán (mặc định A*)
-    const algo = algorithm || 'astar';
-    const routeFinder = algorithmManager.get(algo);
-    if (!routeFinder) {
-      return res.status(400).json({ error: `Thuật toán '${algo}' không tồn tại` });
-    }
-
-    // 9. Chạy thuật toán tìm đường
-    const result = await algorithmManager.run(algo, { nodes, graph, startId, goalId });
-
-    // 10. Trả kết quả về client
-    if (!result || !result.path) {
-      return res.status(404).json({ error: 'Không tìm thấy đường đi khả thi' });
-    }
-
-    // 11. MỚI: Gửi kèm tọa độ của node đã tìm thấy
-    result.startPoint = { lat: startNode.lat, lon: startNode.lon };
-    result.goalPoint = { lat: goalNode.lat, lon: goalNode.lon };
-
-    return res.status(200).json({
-      algorithm: algo,
-      path: result.path,
-      steps: result.steps,
-      startPoint: result.startPoint, 
-      goalPoint: result.goalPoint,
-      distance: result.distance, // Thêm nếu thuật toán của bạn trả về
-    });
-
-  } catch (err) {
-    console.error('findRoute error:', err);
-    res.status(500).json({ error: 'Lỗi máy chủ nội bộ' });
-  }
 };
 
-
-/**
- * @desc API liệt kê các thuật toán đang hỗ trợ
- * @route GET /api/algorithms
- */
 exports.listAlgorithms = (req, res) => {
-  try {
-    const list = algorithmManager.list();
-    res.json({ availableAlgorithms: list });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-/**
- * @desc API reload lại dữ liệu graph (nếu dữ liệu MongoDB có thay đổi)
- * @route POST /api/reload
- */
-exports.reloadGraph = async (req, res) => {
-  try {
-    await graphLoader.loadAll();
-    res.json({ message: 'Graph reloaded successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-/**
- * @desc API lấy TẤT CẢ các node (để hiển thị trên bản đồ)
- * @route GET /api/nodes
- */
-exports.getAllNodes = async (req, res) => {
-  try {
-    // 1. Đảm bảo graph đã load
-    if (!graphLoader.isLoaded()) {
-      await graphLoader.loadAll();
+    try {
+        const list = algorithmManager.list();
+        res.json({ availableAlgorithms: list });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
+};
 
-    // 2. Lấy map 'nodes' từ graphLoader
-    const { nodes } = await graphLoader.getGraph();
+exports.reloadGraph = async (req, res) => {
+    try {
+        await graphLoader.loadAll();
+        res.json({ message: 'Graph reloaded successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
 
-    // 3. Chuyển Map thành Array để gửi JSON
-    const nodesArray = Array.from(nodes.values());
+exports.getAllNodes = async (req, res) => {
+    try {
+        if (!graphLoader.isLoaded()) {
+            await graphLoader.loadAll();
+        }
+        const { nodes } = await graphLoader.getGraph();
+        const nodesArray = Array.from(nodes.values());
+        res.status(200).json(nodesArray);
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi máy chủ' });
+    }
+};
 
-    res.status(200).json(nodesArray);
-  } catch (err) {
-    console.error('getAllNodes error:', err);
-    res.status(500).json({ error: 'Lỗi máy chủ nội bộ' });
-  }
+exports.getGraphStats = async (req, res) => {
+    try {
+        if (!graphLoader.isLoaded()) {
+            await graphLoader.loadAll();
+        }
+        
+        const { nodes, graph } = await graphLoader.getGraph();
+        
+        let connectedNodes = 0;
+        let totalEdges = 0;
+        
+        for (const [nodeId, edges] of graph.entries()) {
+            totalEdges += edges.size; // Sửa lỗi .length thành .size nếu là Map
+            if (edges.size > 0) {
+                connectedNodes++;
+            }
+        }
+        
+        res.json({
+            totalNodes: nodes.size,
+            connectedNodes,
+            isolatedNodes: nodes.size - connectedNodes,
+            totalEdges: totalEdges / 2,
+            graphLoaded: true
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };

@@ -17,6 +17,8 @@ function App() {
   const {
     startPoint,
     endPoint,
+    setStartPoint,
+    setEndPoint,
     selectingPoint,
     setSelectingPoint,
     displayRoute,
@@ -34,6 +36,14 @@ function App() {
         endPoint, 
         selectedAlgorithm
       );
+      if (routeData.startPoint) {
+      // Cập nhật state startPoint bằng tọa độ của node đã snap
+      setStartPoint([routeData.startPoint.lat, routeData.startPoint.lon]);
+    }
+    if (routeData.goalPoint) {
+      // Cập nhật state endPoint bằng tọa độ của node đã snap
+      setEndPoint([routeData.goalPoint.lat, routeData.goalPoint.lon]);
+    }
       setRoute(routeData);
       displayRoute(routeData);
     } catch (err) {
